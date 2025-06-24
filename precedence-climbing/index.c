@@ -17,6 +17,7 @@
   V("(", LeftParen) \
   V(")", RightParen) \
   V(",", Comma) \
+  V("<eof>", Eof) \
   V("<int>", Int) \
   V("<var>", Var)
 
@@ -69,7 +70,7 @@ void tokenizer_advance(struct TokenIterator *current) { current->data++; }
 struct TokenIterator tokenizer_next(struct TokenIterator current) {
 try_again:
   if (tokenizer_at_end(current)) {
-    return current;
+    return (struct TokenIterator){{kEof}};
   }
   char c = tokenizer_peek(current);
   tokenizer_advance(&current);
@@ -127,17 +128,20 @@ try_again:
   exit(EXIT_FAILURE);
 }
 
+#define FOR_EACH_BINARY_OP(V) \
+  V(Plus) \
+  V(Minus) \
+  V(Times) \
+  V(Divide) \
+  V(Power) \
+  V(Less) \
+  V(LessEqual)
+
 #define FOR_EACH_AST_NODE_TYPE(V) \
   V(Int) \
   V(Var) \
-  V(Add) \
-  V(Sub) \
-  V(Mul) \
-  V(Div) \
-  V(Pow) \
-  V(Less) \
-  V(LessEqual) \
   V(Negate) \
+  FOR_EACH_BINARY_OP(V) \
   V(Call)
 
 enum ASTNodeType {
@@ -146,6 +150,16 @@ enum ASTNodeType {
   FOR_EACH_AST_NODE_TYPE(ENUM)
 #undef ENUM
 };
+
+const char *ast_node_name(enum ASTNodeType type) {
+  switch (type) {
+#define STR(name) \
+    case kAST##name: return #name;
+    FOR_EACH_AST_NODE_TYPE(STR)
+#undef STR
+    default: return "Unknown";
+  }
+}
 
 struct ASTNode {
   enum ASTNodeType type;
@@ -161,24 +175,13 @@ struct VarNode {
   struct Slice name;
 };
 
-#define BINARY_OP_NODE(name) \
-struct name##Node { \
-  struct ASTNode base; \
-  struct ASTNode *left; \
-  struct ASTNode *right; \
+struct BinaryOpNode {
+  struct ASTNode base;
+  struct ASTNode *left;
+  struct ASTNode *right;
 };
 
-BINARY_OP_NODE(Add)
-BINARY_OP_NODE(Sub)
-BINARY_OP_NODE(Mul)
-BINARY_OP_NODE(Div)
-BINARY_OP_NODE(Pow)
-BINARY_OP_NODE(Less)
-BINARY_OP_NODE(LessEqual)
-
-#undef BINARY_OP_NODE
-
-struct NegateNode {
+struct UnaryOpNode {
   struct ASTNode base;
   struct ASTNode *operand;
 };
@@ -197,27 +200,25 @@ struct ASTNode *ast_new_Var(struct Slice name) {
   return (struct ASTNode *)node;
 }
 
-#define BINARY_OP_NEW(name) \
-struct ASTNode *ast_new_##name(struct ASTNode *left, struct ASTNode *right) { \
-  struct name##Node *node = malloc(sizeof(struct name##Node)); \
-  node->base.type = kAST##name; \
-  node->left = left; \
-  node->right = right; \
-  return (struct ASTNode *)node; \
+struct ASTNode *ast_new_binary_op(enum ASTNodeType type, struct ASTNode *left, struct ASTNode *right) {
+  struct BinaryOpNode *node = malloc(sizeof(struct BinaryOpNode));
+  node->base.type = type;
+  node->left = left;
+  node->right = right;
+  return (struct ASTNode *)node;
 }
 
-BINARY_OP_NEW(Add)
-BINARY_OP_NEW(Sub)
-BINARY_OP_NEW(Mul)
-BINARY_OP_NEW(Div)
-BINARY_OP_NEW(Pow)
-BINARY_OP_NEW(Less)
-BINARY_OP_NEW(LessEqual)
-
-#undef BINARY_OP_NEW
+// #define NEW_FUNC(name) \
+// struct ASTNode *ast_new_##name(struct ASTNode *left, struct ASTNode *right) { \
+//   return ast_new_binary_op(kAST##name, left, right); \
+// }
+// 
+// FOR_EACH_BINARY_OP(NEW_FUNC)
+// 
+// #undef NEW_FUNC
 
 struct ASTNode *ast_new_Negate(struct ASTNode *operand) {
-  struct NegateNode *node = malloc(sizeof(struct NegateNode));
+  struct UnaryOpNode *node = malloc(sizeof(struct UnaryOpNode));
   node->base.type = kASTNegate;
   node->operand = operand;
   return (struct ASTNode *)node;
@@ -251,11 +252,14 @@ int operator_precedence(enum TokenType type) {
     case kDivide: return prec;
     prec++;
     case kPower: return prec;
-    default: return -1; // Invalid precedence
+    default: {
+      fprintf(stderr, "Invalid operator type %s\n", token_name(type));
+      exit(EXIT_FAILURE);
+    }
   }
 }
 
-enum Associativity { kInvalidAssociativity = -1, kLeft, kRight, kAny, };
+enum Associativity { kLeft, kRight, kAny, };
 
 enum Associativity operator_associativity(enum TokenType type) {
   switch (type) {
@@ -269,40 +273,86 @@ enum Associativity operator_associativity(enum TokenType type) {
       return kLeft;
     case kPower:
       return kRight;
-    default:
-      return kInvalidAssociativity;
+    default: {
+      fprintf(stderr, "Invalid operator type %s\n", token_name(type));
+      exit(EXIT_FAILURE);
+    }
   }
 }
 
+bool parser_at_end(struct TokenIterator current) { return current.token.type == kEof; }
+
 struct ASTNode *parse_atom(struct TokenIterator *iterator) {
-  abort();
+  if (parser_at_end(*iterator)) {
+    fprintf(stderr, "Unexpected end of input\n");
+    exit(EXIT_FAILURE);
+  }
+  switch (iterator->token.type) {
+    case kInt: {
+      struct ASTNode *result = ast_new_Int(iterator->token.number);
+      *iterator = tokenizer_next(*iterator);
+      return result;
+    }
+    case kVar: {
+      struct ASTNode *result = ast_new_Var(iterator->token.slice);
+      *iterator = tokenizer_next(*iterator);
+      return result;
+    }
+    // TODO(max): Parse negation
+    // TODO(max): Parse parentheses
+    default:
+      fprintf(stderr, "Unexpected token %s\n", token_name(iterator->token.type));
+      exit(EXIT_FAILURE);
+  }
 }
 
 struct ASTNode *parse_expression(struct TokenIterator *iterator, int min_prec) {
   struct ASTNode *lhs = parse_atom(iterator);
-  while (!tokenizer_at_end(*iterator) && is_operator(iterator->token.type)) {
-    int prec = operator_precedence(iterator->token.type);
-    if (prec < min_prec) {
+  struct Token token;
+  while (!parser_at_end(*iterator) && is_operator((token = iterator->token).type)) {
+    int op_prec = operator_precedence(token.type);
+    if (op_prec < min_prec) {
       return lhs;
     }
-    abort();
+    *iterator = tokenizer_next(*iterator);
+    int next_prec = operator_associativity(token.type) == kLeft ? op_prec + 1 : op_prec;
+    struct ASTNode *rhs = parse_expression(iterator, next_prec);
+    switch (token.type) {
+#define CALL_NEW(name) case k##name: lhs = ast_new_binary_op(kAST##name, lhs, rhs); break;
+      FOR_EACH_BINARY_OP(CALL_NEW)
+#undef CALL_NEW
+      // TODO(max): Parse function calls
+      default:
+        fprintf(stderr, "Unhandled operator %s\n", token_name(token.type));
+        exit(EXIT_FAILURE);
+    }
   }
-  abort();
+  return lhs;
 }
 
 int main() {
-  const char *input = "1+abc*3";
+  const char *input = "1+2*3";
   struct TokenIterator iterator = tokenizer_new(input);
-  while (!tokenizer_at_end(iterator)) {
-    iterator = tokenizer_next(iterator);
-    fprintf(stderr, "Token type: %s\n", token_name(iterator.token.type));
-    if (iterator.token.type == kInt) {
-      fprintf(stderr, "  : %d\n", iterator.token.number);
-    } else if (iterator.token.type == kVar) {
-      fprintf(stderr, "  : %.*s\n", (int)iterator.token.slice.length, iterator.token.slice.data);
-    }
-    // Process the token here (not implemented yet)
+  iterator = tokenizer_next(iterator);  // prime the iterator
+  struct ASTNode *ast = parse_expression(&iterator, 0);
+  if (!parser_at_end(iterator)) {
+    fprintf(stderr, "Unexpected token after expression: %s\n", token_name(iterator.token.type));
+    exit(EXIT_FAILURE);
   }
-
+  if (ast->type != kASTPlus) {
+    fprintf(stderr, "Expected an addition operation at the root, got %s\n", ast_node_name(ast->type));
+    exit(EXIT_FAILURE);
+  }
+  struct BinaryOpNode *root = (struct BinaryOpNode *)ast;
+  struct ASTNode *left = root->left;
+  if (left->type != kASTInt) {
+    fprintf(stderr, "Expected an integer on the left side, got %s\n", ast_node_name(left->type));
+    exit(EXIT_FAILURE);
+  }
+  struct ASTNode *right = root->right;
+  if (right->type != kASTTimes) {
+    fprintf(stderr, "Expected a binary operation on the right side, got %s\n", ast_node_name(right->type));
+    exit(EXIT_FAILURE);
+  }
   return 0;
 }
