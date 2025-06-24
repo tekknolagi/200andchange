@@ -243,20 +243,29 @@ int operator_precedence(enum TokenType type) {
   int prec = 0;
   switch (type) {
     case kLess:
-    case kLessEqual: return prec;
-    prec++;
-    case kPlus:
-    case kMinus: return prec;
-    prec++;
-    case kTimes:
-    case kDivide: return prec;
-    prec++;
-    case kPower: return prec;
-    default: {
-      fprintf(stderr, "Invalid operator type %s\n", token_name(type));
-      exit(EXIT_FAILURE);
-    }
+    case kLessEqual:
+      return prec;
+    default: prec++;
   }
+  switch (type) {
+    case kPlus:
+    case kMinus:
+      return prec;
+    default: prec++;
+  }
+  switch (type) {
+    case kTimes:
+    case kDivide:
+      return prec;
+    default: prec++;
+  }
+  switch (type) {
+    case kPower:
+      return prec;
+    default: prec++;
+  }
+  fprintf(stderr, "Invalid operator type %s\n", token_name(type));
+  exit(EXIT_FAILURE);
 }
 
 enum Associativity { kLeft, kRight, kAny, };
